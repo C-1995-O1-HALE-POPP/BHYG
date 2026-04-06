@@ -12,25 +12,11 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  source-check:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-15-intel, macos-latest]
-        # os: [windows-latest, ubuntu-latest, macos-15-intel, macos-latest, windows-11-arm]
-        include:
-          - os: windows-latest
-            build: BHYG-Windows.exe
-          - os: ubuntu-22.04
-            build: BHYG-Linux
-          - os: macos-15-intel
-            build: BHYG-macOS-Intel.bin
-          - os: macos-latest
-            build: BHYG-macOS-Apple_Silicon.bin
-          # - os: windows-11-arm
-          #   build: BHYG-Windows-arm.exe
+        os: [windows-latest, ubuntu-22.04, macos-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      version: ${{ github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,25 +32,5 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Cython
-        run: pip install Cython
-
-      - name: Nuitka Build
-        uses: Nuitka/Nuitka-Action@main
-        with:
-          script-name: loader.py
-          mode: onefile
-          include-data-dir: ./locale=locale
-          output-file: ${{ github.ref_name }}-${{ matrix.build }}
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          archive: false
-          path: build/${{ github.ref_name }}-${{ matrix.build }}
-
-      - name: Upload Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: build/${{ github.ref_name }}-${{ matrix.build }}
+      - name: Syntax check
+        run: python -m py_compile *.py

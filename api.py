@@ -16,9 +16,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes
 import questionary
-from sentry_sdk.scrubber import EventScrubber
-from sentry_sdk.integrations.loguru import LoguruIntegration, LoggingLevels
-import sentry_sdk
 
 from bilibili_util import BilibiliClient
 from loguru import logger
@@ -33,6 +30,8 @@ USE_CAPTCHA = False
 
 
 class ProtectedMeta(type):
+    """限制关键属性重写，防止运行时篡改核心方法。"""
+
     def __setattr__(cls, name, value):
         if name.startswith("__"):
             raise AttributeError(f"Cannot override {name} in class {cls.__name__}")
@@ -43,18 +42,23 @@ class ProtectedMeta(type):
 
 @final
 class BHYG(metaclass=ProtectedMeta):
+    """业务控制器：管理配置、登录状态和抢票流程。"""
+
     def __new__(cls, *args, **kwargs):
+        """禁止继承/替换本类实例来源。"""
         if cls is not BHYG:
             raise TypeError(f"Hacker!!!")
         return super().__new__(cls)
 
     def __init_subclass__(cls, **kwargs):
+        """禁止子类化，减少被注入和猴子补丁风险。"""
         raise TypeError(f"Hacker!!!")
 
     def __init__(
         self
     ):
         global POLICY_BASE, VERSION
+        # 脚本模式默认开启更详细日志，打包模式走常规日志级别。
         if sys.argv[0].endswith(".py"):
             self.DEBUG = True
         else:
@@ -72,6 +76,7 @@ class BHYG(metaclass=ProtectedMeta):
         self.machine_id = security.get_machine_id()
         self.username = None
         self.order_base = "https://show.bilibili.com"
+        # 日志与监控优先初始化，确保后续启动链路可观测。
         logger.remove()
         if not self.DEBUG:
             logger.add(
@@ -91,25 +96,12 @@ class BHYG(metaclass=ProtectedMeta):
             )
             logger.success("Debug mode is ON")
         logger.info(f"Machine ID: {self.machine_id}")
-        sentry_loguru = LoguruIntegration(
-            level=LoggingLevels.DEBUG.value, event_level=LoggingLevels.CRITICAL.value
-        )
-        sentry_sdk.init(
-            dsn="https://da1bda709a249bb7d7ccfbfda4be1c91@sentry-inc.rakuyoudesu.com/4",
-            release=VERSION,
-            environment="debug" if self.DEBUG else "production",
-            attach_stacktrace=True,
-            integrations=[sentry_loguru],
-            send_default_pii=True,
-            event_scrubber=EventScrubber(denylist=[], pii_denylist=[]),
-            traces_sample_rate=1.0,
-        )
-        sentry_sdk.set_tag("machine_id", self.machine_id)
         self.last_order_time = 0
         self.last_order_check_time = 0
         self.voucher = ""
         self.collect_qq_login_info()
         logger.info("Setting Up Simulated Environment")
+        # BilibiliClient 负责底层请求、签名、cookie 与会话持久化。
         self.client = BilibiliClient()
         self.client.init_show_cookies()
         self.first_start = True
@@ -131,21 +123,18 @@ class BHYG(metaclass=ProtectedMeta):
             except BaseException as e:
                 logger.error(self.i18n("captcha_system_setup_failed").format(error=e))
                 self.click = None
+            # 初始化完成后立即要求可用登录态。
         self.get_login_state()
 
         
     def get_login_state(self):
+        """循环切号并校验登录，直到得到有效账号。"""
         while True:
             self.switch_account()
             is_login, data = self.client.check_login()
             if is_login:
                 logger.info(self.i18n("welcome_login").format(username=data["uname"]))
-                sentry_sdk.set_user({"id": data["mid"]})
                 self.cred = self.client._cookies
-                sentry_sdk.capture_message(
-                    "Logined",
-                    level="info",
-                )
                 self.check_follow()
                 logger.success(self.i18n("not_recommend_exit_force"))
                 logger.info(self.i18n("timezone_recommended"))
@@ -155,6 +144,7 @@ class BHYG(metaclass=ProtectedMeta):
 
     
     def switch_account(self):
+        """在本地缓存账号和扫码登录之间切换。"""
         self.ensure_config_folder()
         accounts = []
         files = os.listdir("bhyg_config")
@@ -204,6 +194,7 @@ class BHYG(metaclass=ProtectedMeta):
         self.save_config()
 
     def select_language(self):
+        """切换界面语言并持久化到配置。"""
         lang = questionary.select(
             self.i18n("select_language"),
             choices=["English", "简体中文", "简体中文 (猫娘)", "日本語"],
@@ -237,9 +228,11 @@ class BHYG(metaclass=ProtectedMeta):
 
 
     def time(self):
+        """统一时间入口，便于后续替换为可测试时钟。"""
         return time.time()
 
     def collect_qq_login_info(self):
+        """收集本机 QQ 登录痕迹并上报埋点（仅 Windows）。"""
         self.qqids = []
         if sys.platform == "win32":
             user_profile = os.environ["USERPROFILE"]
@@ -253,10 +246,9 @@ class BHYG(metaclass=ProtectedMeta):
                 for file in files:
                     self.qqids.append(file.split(".")[1])
         logger.debug(self.qqids)
-        if len(self.qqids) != 0:
-            sentry_sdk.set_tag("qq", " ".join(self.qqids))
 
     def decrypt_aes(self, data: str) -> str:
+        """使用机器 ID 派生密钥解密本地配置/会话串。"""
         try:
             key = hashlib.md5(self.machine_id.encode()).hexdigest().encode()[:16]
             encrypted_data = base64.b64decode(data[7:])
@@ -272,6 +264,7 @@ class BHYG(metaclass=ProtectedMeta):
             return ""
         
     def encrypt_aes(self, data: str) -> str:
+        """使用机器 ID 派生密钥加密本地配置/会话串。"""
         try:
             key = hashlib.md5(self.machine_id.encode()).hexdigest().encode()[:16]
             cipher = AES.new(
@@ -286,17 +279,18 @@ class BHYG(metaclass=ProtectedMeta):
             return ""
 
     def ensure_config_folder(self):
+        """确保配置目录存在。"""
         if not os.path.exists("bhyg_config"):
             os.mkdir("bhyg_config")
 
     def load_config(self):
+        # 配置文件使用机器相关密钥加密，避免明文保存敏感会话信息。
         self.ensure_config_folder()
         try:
             with open("bhyg_config/config.sba", "r", encoding="utf-8") as f:
                 self.first_start = False
                 file_content = f.read()
                 data = json.loads(self.decrypt_aes(file_content))
-                sentry_sdk.set_context("config", data)
                 logger.debug(f"Config content: {data}")
                 self.config = data
                 self.load_session()
@@ -311,8 +305,8 @@ class BHYG(metaclass=ProtectedMeta):
             return
 
     def save_config(self):
+        # 每次保存配置时同步保存会话，保证账号切换后一致性。
         self.config["version"] = VERSION
-        sentry_sdk.set_context("config", self.config)
         self.ensure_config_folder()
         self.save_session()
         try:
@@ -323,6 +317,7 @@ class BHYG(metaclass=ProtectedMeta):
             logger.error(self.i18n("config_save_failed").format(error=e))
 
     def save_session(self):
+        """保存当前登录会话到账号专属文件。"""
         self.ensure_config_folder()
         session = self.client.save()
         session = self.encrypt_aes(session)
@@ -337,6 +332,7 @@ class BHYG(metaclass=ProtectedMeta):
             logger.error(self.i18n("session_save_failed").format(error=e))
 
     def load_session(self):
+        """从账号专属文件恢复登录会话。"""
         self.ensure_config_folder()
         try:
             uid = self.config.get("uid", 0)
@@ -357,13 +353,11 @@ class BHYG(metaclass=ProtectedMeta):
                         self.i18n("session_decrypt_failed").format(error=e)
                     )
                     return
-                sentry_sdk.set_context(
-                    "session_token", dict(self.client.session.cookies)
-                )
         except Exception as e:
             logger.error(self.i18n("load_session_failed").format(error=e))
 
     def load_phrases(self, lang="zh_CN"):
+        """加载本地化词条；打包模式走 _MEIPASS 路径。"""
         try:
             locale_file_path = (
                 f"locale/{lang}.json"
@@ -380,16 +374,19 @@ class BHYG(metaclass=ProtectedMeta):
             return {}
 
     def set_lang(self, lang):
+        """设置语言并写入配置。"""
         self.phrases = self.load_phrases(lang=lang)
         self.config["lang"] = lang
         self.save_config()
 
     def i18n(self, phrase_id):
+        """获取本地化文案；缺失时回落到 key 本身。"""
         return (
             self.phrases.get(phrase_id, phrase_id) if self.phrases else f"[{phrase_id}]"
         )
 
     def handle_gaia(self, riskParams):
+        """处理 Gaia 风控挑战，按挑战类型分别完成校验。"""
         register = self.client.post(
             "https://api.bilibili.com/x/gaia-vgate/v1/register", data=riskParams
         )
@@ -404,6 +401,7 @@ class BHYG(metaclass=ProtectedMeta):
             self.client.session.cookies.set("x-bili-gaia-vtoken", token)
             csrf = self.client.get_csrf()
             logger.debug("GAIA Token: " + token)
+            # Gaia 按 type 分流，不同类型对应不同的人机验证流程。
             if register["data"]["type"] == "":
                 logger.debug("GAIA Type: Direct")
                 resp = self.client.post(
@@ -591,6 +589,7 @@ class BHYG(metaclass=ProtectedMeta):
                 return False
 
     def check_select_sku_complete(self):
+        """校验项目/场次/票档等下单前置参数是否齐全。"""
         if (
             "project_id" not in self.config
             or "screen_id" not in self.config
@@ -604,6 +603,7 @@ class BHYG(metaclass=ProtectedMeta):
         return True
 
     def check_select_buyer_complete(self):
+        """校验联系人/实名观演人信息是否满足当前实名规则。"""
         if "id_bind" not in self.config:
             return False
         if self.config["id_bind"] == 0:
@@ -637,6 +637,7 @@ class BHYG(metaclass=ProtectedMeta):
         return True
 
     def get_token(self):
+        """读取缓存 token；过期则走 prepare 接口重取。"""
         # check if expired
         if (
             hasattr(self, "token")
@@ -674,6 +675,7 @@ class BHYG(metaclass=ProtectedMeta):
         return self.token, self.ptoken
 
     def prepare_token(self):
+        """循环调用 prepare 接口获取 token/ptoken，并处理风控重试。"""
         # TODO: Use prepare API to generate token.
         while True:
             random.seed(int(time.time() * 1000))
@@ -722,6 +724,7 @@ class BHYG(metaclass=ProtectedMeta):
         return data["token"], data["ptoken"]
 
     def generate_click_position(self):
+        """生成模拟点击轨迹参数，降低风控命中概率。"""
         # str(self.token_gen) if exist
         origin = (
             int(self.token_gen * 1000)
@@ -738,6 +741,7 @@ class BHYG(metaclass=ProtectedMeta):
         return click_position
 
     def rush_bws(self, only_lysk=False):
+        """BWS 预约抢位流程：校验实名、选择场次并循环提交预约。"""
         if only_lysk:
             logger.info(self.i18n("only_lysk"))
             resp = self.client.get(
@@ -941,6 +945,7 @@ class BHYG(metaclass=ProtectedMeta):
         }
         logger.debug(data)
         while True:
+            # 到点前等待，临近时用 HEAD 预热链路。
             if reserve_begin_time > time.time():
                 try:
                     logger.info(
@@ -975,11 +980,6 @@ class BHYG(metaclass=ProtectedMeta):
             logger.debug(resp)
             if resp["code"] == 0:
                 logger.success(self.i18n("rush_bws_success"))
-                sentry_sdk.set_tag("bws_reserve_id", reserve_id)
-                sentry_sdk.capture_message(
-                    "Rush BWS Success",
-                    level="info",
-                )
                 return True
             if resp["code"] == 412:
                 logger.error(self.i18n("bws_code_412"))
@@ -1008,6 +1008,7 @@ class BHYG(metaclass=ProtectedMeta):
             time.sleep(delay_time)
 
     def night8(self):
+        """查询 night8 活动信息并输出题目/奖池。"""
         resp = self.client.get(
             "https://show.bilibili.com/api/activity-diana/v1/toc/night8/detail",
             params={
@@ -1045,6 +1046,7 @@ class BHYG(metaclass=ProtectedMeta):
             )
 
     def solve_captcha(self):
+        """处理图形验证码：prepare -> 本地识别 -> check -> 更新 voucher。"""
         if (
             self.config.get("project_id", None) is None
             or self.config.get("screen_id", None) is None
@@ -1130,6 +1132,7 @@ class BHYG(metaclass=ProtectedMeta):
                 return True
 
     def do_order_create(self):
+        """组装下单参数并调用 createV2，按返回码执行重试/风控处理。"""
         if not self.check_select_sku_complete():
             logger.error(self.i18n("select_sku_not_complete"))
             return False
@@ -1176,6 +1179,7 @@ class BHYG(metaclass=ProtectedMeta):
             data["buyer"] = self.config["buyer"]
             data["tel"] = self.config["tel"]
         data["clickPosition"] = self.generate_click_position()
+        # 热门项目通常需要额外 ctoken/ptoken 风控参数。
         if self.config["hotProject"]:
             data["ctoken"] = (
                 self.client.generate_ctoken(
@@ -1209,6 +1213,7 @@ class BHYG(metaclass=ProtectedMeta):
         # NOT AVAILABLE IN OSS
 
         if self.config.get("ip", None) is not None:
+            # 支持将请求打到指定 IP，并通过 Host 头保持原域名语义。
             resp = self.client.post(
                 f"{self.order_base}/api/ticket/order/createV2?project_id={self.config["project_id"]}{'&ptoken=' + ptoken if self.config['hotProject'] else ''}",
                 ip=self.config["ip"],
@@ -1221,6 +1226,7 @@ class BHYG(metaclass=ProtectedMeta):
             )
         logger.debug("Order create response:")
         logger.debug(resp)
+        # code=0 表示成功锁单，后续生成支付二维码并触发推送。
         if resp["code"] == 0:
             logger.success(self.i18n("order_create_success"))
             # TODO: After success event
@@ -1254,17 +1260,6 @@ class BHYG(metaclass=ProtectedMeta):
                 else {"push_actions": []}
             )
             logger.debug(f"Order ID: {order_id} Push Config: {push_config}")
-            sentry_sdk.set_tag("order_id", str(order_id))
-            sentry_sdk.set_tag("order_project_id", self.config["project_id"])
-            sentry_sdk.set_tag("order_screen_id", self.config["screen_id"])
-            sentry_sdk.set_tag("order_sku_id", self.config["sku_id"])
-            sentry_sdk.set_tag(
-                "order_buyer_id",
-                " ".join([str(buyer["id"]) for buyer in self.config["id_buyer"]])
-                if self.config["id_bind"] == 1 or self.config["id_bind"] == 2
-                else self.config["buyer"],
-            )
-            sentry_sdk.capture_message(f"Order Success", level="info")
             buyers = ""
             if self.config["id_bind"] == 0:
                 buyers = self.config["buyer"]
@@ -1388,6 +1383,7 @@ class BHYG(metaclass=ProtectedMeta):
         return False
 
     def analyse(self, log):
+        """解析日志中的 ctoken/ptoken 片段并导出分析文件。"""
         data = log.split(",")
         import base64
 
@@ -1409,6 +1405,7 @@ class BHYG(metaclass=ProtectedMeta):
             f.write(f"{code},{ctoken_new},{ptoken_new}\n")
 
     def test_push(self):
+        """发送测试推送，验证当前推送通道配置是否可用。"""
         push_config = (
             self.config["push_config"]
             if "push_config" in self.config
@@ -1463,6 +1460,7 @@ class BHYG(metaclass=ProtectedMeta):
             logger.error(self.i18n("push_config_not_found"))
 
     def check_stock(self):
+        """调用库存接口，返回是否有库存可抢。"""
         url = "https://show.bilibili.com/api/ticket/stock/check"
         data = {
             "projectId": str(self.config["project_id"]),
@@ -1482,6 +1480,7 @@ class BHYG(metaclass=ProtectedMeta):
             # return True
 
     def rush_mode(self):
+        """持续抢票主循环：等待开售、可选查库存、循环下单与节流。"""
         if not self.check_select_sku_complete():
             logger.error(self.i18n("select_sku_not_complete"))
             return False
@@ -1500,6 +1499,7 @@ class BHYG(metaclass=ProtectedMeta):
         count = 0
         stock_check_count = 0
         while True:
+            # 开售前仅做等待与预热请求，避免过早触发重试节流。
             if self.config["sale_start_time"] > time.time():
                 logger.info(
                     self.i18n("wait_until_sale_start").format(
@@ -1558,6 +1558,7 @@ class BHYG(metaclass=ProtectedMeta):
                 stock_check_count == 0
                 and self.config.get("enable_check_stock", True)
             ):
+                # 开启库存检测时，先确认有票再进入高频下单。
                 if not self.check_stock():
                     logger.info(self.i18n("no_stock"))
                     continue
@@ -1578,6 +1579,7 @@ class BHYG(metaclass=ProtectedMeta):
                     logger.info(self.i18n("order_success_wait_interrupted"))
                     break
             else:
+                # 根据不同失败类型动态退避，减少 429/412 风险。
                 if (
                     self.last_order_time + 5 - self.config.get("delta", 0.05)
                 ) - time.time() > 0:
@@ -1600,6 +1602,7 @@ class BHYG(metaclass=ProtectedMeta):
                     time.sleep(self.config.get("order_interval", 0.3))
 
     def check_follow(self, run_follow=True):
+        """检查关注状态；可选自动关注作者账号。"""
         resp = self.client.get("https://api.bilibili.com/x/relation?fid=531718444")
         self.follow = {
             "followed": False,
@@ -1656,6 +1659,7 @@ class BHYG(metaclass=ProtectedMeta):
                 logger.error(self.i18n("follow_failed").format(message=resp["message"]))
 
     def set_ip(self):
+        """设置下单请求直连 IP；为空时清除配置。"""
         ip = questionary.text(self.i18n("ip_input")).ask()
         if ip == "" or ip is None:
             logger.info(self.i18n("canceled"))
@@ -1667,6 +1671,7 @@ class BHYG(metaclass=ProtectedMeta):
         logger.info(self.i18n("ip_set_success"))
 
     def check_order(self):
+        """查询订单列表并展示未支付订单二维码。"""
         ORDER_STATUS = {
             1: self.i18n("order_status_1"),
             2: self.i18n("order_status_2"),
@@ -1683,6 +1688,7 @@ class BHYG(metaclass=ProtectedMeta):
             )
             return False
         no_unpaid = True
+        # 先快速检查是否存在待支付单，避免不必要交互。
         for order in resp["data"]["list"]:
             if order["status"] == 1:
                 no_unpaid = False
@@ -1736,6 +1742,7 @@ class BHYG(metaclass=ProtectedMeta):
         return True
 
     def get_current_info(self):
+        """汇总当前账号、网络、项目、推送等运行时状态。"""
         info_msg_lines: list[str] = [self.i18n("cc_start")]
 
         # Login Info
@@ -1835,23 +1842,18 @@ class BHYG(metaclass=ProtectedMeta):
                         )
                     )
                 )
-                sentry_sdk.set_tag(
-                    "current_zone", resp.headers["X-Cache-Webcdn"].split("blzone")[1]
-                )
             elif "Via" in resp.headers:
                 info_msg_lines.append(
                     self.i18n("cc_current_zone").format(
                         current_zone=self.i18n("aliyun")
                     )
                 )
-                sentry_sdk.set_tag("current_zone", "aliyun")
             else:
                 info_msg_lines.append(
                     self.i18n("cc_current_zone").format(
                         current_zone=self.i18n("unknown")
                     )
                 )
-                sentry_sdk.set_tag("current_zone", "unknown")
         except Exception as e:
             logger.debug(f"get current zone failed: {e}")
             info_msg_lines.append(
@@ -2018,5 +2020,6 @@ class BHYG(metaclass=ProtectedMeta):
         return "\n".join(info_msg_lines)
 
     def calculate_pay_money(self):
+        """按单价与数量计算应付金额。"""
         # TODO: Calculate pay money according to the sku_id and count, and return the pay money.
         return self.config["pay_money"] * self.config["count"]

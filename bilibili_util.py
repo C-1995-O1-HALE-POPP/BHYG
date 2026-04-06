@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 from loguru import logger
 
 class BilibiliClient:
+    """B 站请求客户端：封装签名、cookie、登录与通用 HTTP 调用。"""
 
     def __init__(self):
         self.uid = 0
@@ -31,6 +32,7 @@ class BilibiliClient:
         self.wbi = False
         self.app_sign = False
         self._get_newest_version()
+        # 随机移动端指纹 + UA，用于贴近真实 App/H5 请求环境。
         self.ua = self._gen_ua()
         self.headers = {
             'User-Agent': self.ua,
@@ -44,6 +46,7 @@ class BilibiliClient:
             timeout=10,
             http2=True,
             event_hooks={
+                # 统一在 Hook 中补签名与风控字段，业务层无需重复处理。
                 "request": [self._on_request],
                 "response": [self._on_response]
             },
@@ -54,6 +57,7 @@ class BilibiliClient:
         self.risk_header = self._gen_risk_header()
 
     def _get_newest_version(self):
+        """拉取最新客户端版本号，用于伪装移动端 UA。"""
         # resp = self.get("https://app.bilibili.com/x/v2/version?mobi_app=android")
         # use origin httpx
         tmp_headers = {
@@ -64,12 +68,15 @@ class BilibiliClient:
         except Exception as e:
             logger.error(f"获取最新版本失败: {e} Fallback to 8.35.0")
             self.biliAppVersion = "8350200"
+            # 可读版本名，主要拼接到 magent 字段中，增强 UA 真实性。
             self.biliAppVersionName = "8.35.0"
             return
         self.biliAppVersion = resp['data'][0]['build']
+        # build 是数值版本，version 是展示版本，UA 中两个字段都会用到。
         self.biliAppVersionName = resp['data'][0]['version']
 
     def _gen_ua(self):
+        """生成模拟 Android BiliApp UA。"""
         _dist = [
             f"Mozilla/5.0 (Linux; Android 15; {self.model} Build/{self._gen_build_id()}; wv)",
             f"AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0",
@@ -81,6 +88,7 @@ class BilibiliClient:
             f"mallVersion/{self.biliAppVersion}",
             f"mVersion/296",
             f"disable_rcmd/0",
+            # 这里同时带可读版本名与 build 号，和真实客户端字段保持一致。
             f"magent/BILI_H5_ANDROID_15_{self.biliAppVersionName}_{self.biliAppVersion}",
         ]
         return " ".join(_dist)
@@ -93,6 +101,7 @@ class BilibiliClient:
         return hmac.new(key.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest().hex()
 
     def _getKeys(self):
+        """拉取 ticket、img_key、sub_key，用于后续风控与 wbi 签名。"""
         ts = int(time.time())
         o = self._hmac_sha256("XgwSnGZ1p",f"ts{ts}")
         csrf = self.session.cookies.get("bili_jct")
@@ -137,6 +146,7 @@ class BilibiliClient:
         return ""
 
     def _wbi_sign(self, params: dict) -> dict:
+        """按 B 站规则计算 wts/w_rid（wbi 签名）。"""
         mixinKeyEncTab = [
             46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
             33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
@@ -161,6 +171,7 @@ class BilibiliClient:
         return curr_time, wbi_sign
 
     def _init_buvid(self):
+        """初始化 buvid 与指纹 cookie，模拟设备身份。"""
         # self.get("https://www.bilibili.com")
         random_md5_1 = hashlib.md5(str(random.random()).encode()).hexdigest()
         random_md5_2 = hashlib.md5(str(random.random()).encode()).hexdigest()
@@ -196,6 +207,7 @@ class BilibiliClient:
         return str(uuid.uuid4()) + str(t).ljust(5, "0") + "infoc"
 
     def init_show_cookies(self):
+        """初始化 show 域购票链路依赖的 cookie。"""
         self.devicefp = uuid.uuid4().hex
         self.session.cookies.update({
             "msource": "bilibiliapp",
@@ -205,6 +217,7 @@ class BilibiliClient:
         self.show_init = True
 
     def _on_request(self, request: httpx.Request):
+        # 根据开关自动附加 wbi/app 参数，并写入常用风控 cookie。
         if self.wbi:
             wts, w_rid = self._wbi_sign(dict(request.url.params))
             p = request.url.params
@@ -550,6 +563,7 @@ class BilibiliClient:
         return base64.b64encode(token_bytes).decode('utf-8')
 
     def get(self, url: str, **kwargs) -> httpx.Response:
+        """统一 GET：网络异常、非 200 和 JSON 结构都归一成固定字典。"""
         try:
             resp = self.session.get(url, **kwargs)
         except Exception as e:
@@ -585,6 +599,7 @@ class BilibiliClient:
             
 
     def post(self, url: str, **kwargs) -> httpx.Response:
+        """统一 POST：支持指定 IP 直连下单，并统一响应结构。"""
         try:
             if "ip" in kwargs and "createV2" in url:
                 from urllib.parse import urlparse

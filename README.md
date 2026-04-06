@@ -20,6 +20,22 @@
 
 若版权方（或相关公司实体）想要下线本项目，请通过 Issue 或 ziantt@protonmail.com 联系我，我会第一时间下线
 
+## 运行方式
+
+本仓库当前仅支持源码运行。
+
+1. 安装依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+2. 启动程序：
+
+```bash
+python main.py
+```
+
 ## Star History
 
 <a href="https://star-history.com/#biliticket/BHYG&Date">

@@ -7,7 +7,6 @@ import os
 import atexit
 import qrcode
 import questionary
-import sentry_sdk
 from loguru import logger
 
 from api import BHYG
@@ -25,6 +24,7 @@ BANNER = """
 
 
 def is_terminal_available():
+    # questionary 依赖可交互终端，GUI/重定向场景下直接退出。
     try:
         return sys.stdout.isatty() and sys.stderr.isatty()
     except (AttributeError, OSError):
@@ -33,11 +33,6 @@ def is_terminal_available():
 
 def exit_handler():
     logger.info("Exiting...")
-    sentry_sdk.capture_message(
-        "Exit",
-        level="info",
-    )
-    sentry_sdk.flush()
     import time
 
     logger.info("Wait 10s to exit...")
@@ -48,6 +43,7 @@ def exit_handler():
     return
 
 def select_ticket():
+    """交互式选择项目、场次、票档并落盘到配置。"""
     SALE_STATUS_MAP = {
         1: client.i18n("sale_status_1"),
         2: client.i18n("sale_status_2"),
@@ -76,7 +72,6 @@ def select_ticket():
         )
         return
     client.config["project_id"] = int(project_id)
-    sentry_sdk.set_tag("project_id", project_id)
     logger.info(client.i18n("project_name").format(name=resp["data"]["name"]))
     ticket_name = f"{resp['data']['name']} "
     client.config["hotProject"] = resp["data"].get("hotProject", False)
@@ -85,6 +80,7 @@ def select_ticket():
         logger.warning(client.i18n("hot_project"))
     client.config["id_bind"] = resp["data"]["id_bind"]
     client.config["is_changfan"] = False
+    # 常贩是独立链路，接口字段和普通项目不完全一致，需要先分流处理。
     changfan = client.client.get(
         "https://show.bilibili.com/api/ticket/linkgoods/list?project_id={}&page_type=0".format(
             project_id
@@ -247,6 +243,7 @@ def start_ticket():
 
 
 def select_buyer():
+    """根据实名绑定规则收集联系人/实名观演人。"""
     client.config["id_buyer"] = []
     client.config["buyer"] = ""
     client.config["tel"] = ""
@@ -334,6 +331,8 @@ def select_buyer():
 
 def main():
     global client, normal_exit
+    """程序入口：初始化环境后进入主菜单分发。"""
+
     # Init
 
     print(BANNER)
@@ -364,10 +363,7 @@ def main():
     client = BHYG()
 
     while True:
-        sentry_sdk.capture_message(
-            "Entered Main Menu",
-            level="info",
-        )
+        # 主循环：展示菜单并将用户动作分发到对应业务函数。
         main_menu = [
             client.i18n("select_ticket_info"),
             client.i18n("select_buyer"),
@@ -858,10 +854,7 @@ def main():
                                     )
                         except Exception as e:
                             logger.exception(e)
-                            track = sentry_sdk.capture_exception(e)
-                            logger.error(
-                                client.i18n("error_occurred").format(trace=track)
-                            )
+                            logger.error(client.i18n("error_occurred").format(trace=e))
                             continue
                 elif action == client.i18n("test_push"):
                     client.test_push()
@@ -961,10 +954,6 @@ def main():
                         logger.error(client.i18n("clean_cache_failed").format(error=e))
                 elif action == None or action == client.i18n("exit"):
                     logger.info(client.i18n("exit"))
-                    sentry_sdk.capture_message(
-                        "Exit",
-                        level="info",
-                    )
                     normal_exit = True
                     sys.exit(0)
                 else:
@@ -976,6 +965,7 @@ def main():
                 raise
         except Exception as e:
             logger.exception(e)
-            track = sentry_sdk.capture_exception(e)
-            logger.error(client.i18n("error_occurred").format(trace=track))
+            logger.error(client.i18n("error_occurred").format(trace=e))
             continue
+if __name__ == "__main__":
+    main()
